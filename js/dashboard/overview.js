@@ -525,7 +525,7 @@ function buildSimulateCard() {
     type: 'number', min: '100', max: '500000', value: '5000', placeholder: '₦',
   });
   card.appendChild(amountInput);
-  const btn = el('button', { class: 'btn btn-primary !py-2.5 !px-4 !text-[13px]' }, 'Send ₦', icon('send'));
+  const btn = el('button', { class: 'btn btn-primary !py-2.5 !px-4 !text-[13px]' }, 'Receive ₦', icon('send'));
   card.appendChild(btn);
 
   let busy = false;
