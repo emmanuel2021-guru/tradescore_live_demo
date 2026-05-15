@@ -176,6 +176,28 @@ export function computeScore(userId) {
 
   const uniqueCustomers = new Set(inflows.map(t => t.description)).size;
 
+  // Revenue history — last 7 calendar months of inflow totals. Empty months
+  // are emitted as zero so the chart renders a continuous timeline instead
+  // of collapsing gaps. Powers the Overview "Revenue trend" chart.
+  const revenueHistory = (() => {
+    const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const buckets = {};
+    inflows.forEach(t => {
+      const d = new Date(t.occurred_at);
+      const k = d.getFullYear() * 12 + d.getMonth();
+      buckets[k] = (buckets[k] || 0) + t.amount_kobo / 100;
+    });
+    const now = new Date();
+    const currentKey = now.getFullYear() * 12 + now.getMonth();
+    const out = [];
+    for (let i = 6; i >= 0; i--) {
+      const k = currentKey - i;
+      const month = ((k % 12) + 12) % 12;
+      out.push({ label: MONTH_LABELS[month], value: Math.round(buckets[k] || 0) });
+    }
+    return out;
+  })();
+
   return {
     score,
     factors,
@@ -186,6 +208,7 @@ export function computeScore(userId) {
       monthlyRevenue,
       growthPct,
       uniqueCustomers,
+      revenueHistory,
     },
   };
 }

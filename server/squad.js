@@ -58,4 +58,9 @@ export const squad = {
 
   simulatePayment: (payload) =>
     call('/virtual-account/simulate/payment', 'POST', payload),
+
+  // Initiate a hosted checkout link. Returns Squad's `data.checkout_url`
+  // (a real https://sandbox-pay.squadco.com/<hash> URL the customer pays at).
+  initiateTransaction: (payload) =>
+    call('/transaction/initiate', 'POST', payload),
 };

@@ -1,8 +1,15 @@
-// ── Mock AI engine ────────────────────────────────────────────────
-// Pretends to be a model. Returns deterministic but realistic responses
-// so judges can experience the integration without an API key. Swap each
-// function below with a real LLM call (Claude, GPT, etc.) when ready.
-import { TRADER, TXS, FACTORS, REV, MONS } from './data.js';
+// ── Local AI helpers (mock fallbacks for offline / unauthed paths) ──
+// The real assistant runs on the backend via /api/chat (Claude). The helpers
+// below stay around for two reasons:
+//   1. Loans / Overview panels call recommendLoan() synchronously to render a
+//      starter offer before the backend's Claude-narrated insight arrives.
+//   2. assistant.js falls back to chatRespond() when the network is down.
+// All numbers should come from the LIVE store (getUser + getScore), never
+// from the all-null TRADER mock in data.js — otherwise we get "₦0" and
+// "TradeScore null" leaking into the UI.
+
+import { LOAN_TIERS, WORKERS } from './data.js';
+import { getUser, getScore } from './store.js';
 
 // Simulated network latency (ms). Used by the chat panel for typing effect.
 const MIN_DELAY = 450;
@@ -11,49 +18,98 @@ export const aiDelay = () =>
   new Promise(r => setTimeout(r, MIN_DELAY + Math.random() * (MAX_DELAY - MIN_DELAY)));
 
 // ── 1. Score insight ────────────────────────────────────────────
-// "Why is my score 742?" — multi-factor, business-aware narrative.
 export function generateScoreInsight() {
-  const top = [...FACTORS].sort((a, b) => b.value - a.value)[0];
-  const weak = [...FACTORS].sort((a, b) => a.value - b.value)[0];
+  const user = getUser();
+  const live = getScore();
+  const firstName = user.firstName || 'Hi';
+  const score = live?.score;
+  const factors = live?.factors || [];
+  const agg = live?.aggregates || {};
+
+  if (score == null) {
+    return {
+      headline: 'Your TradeScore will appear here once payments start landing.',
+      body: [
+        `${firstName}, your virtual account is ready — share it with your customers.`,
+        `Once we see your **first 3 payments**, we compute a score on the 350–850 scale and explain every factor.`,
+        `Try the **Receive money** button on the Overview tab to share your account, or simulate a test inflow.`,
+      ],
+      delta: null,
+      confidence: 0.92,
+    };
+  }
+
+  const top  = [...factors].sort((a, b) => b.value - a.value)[0];
+  const weak = [...factors].sort((a, b) => a.value - b.value)[0];
+  const txN = agg.transactions ?? 0;
+  const uN  = agg.uniqueCustomers ?? 0;
+  const body = [
+    `${firstName}, your TradeScore of ${score} reflects ${txN} ${txN === 1 ? 'transaction' : 'transactions'} from ${uN} unique ${uN === 1 ? 'customer' : 'customers'} on your Squad virtual account.`,
+  ];
+  if (top)  body.push(`Your strongest factor is **${top.label}** (${top.value}/100) — ${top.desc.toLowerCase()}.`);
+  if (weak && weak.label !== top?.label) {
+    body.push(`The biggest lift remaining is **${weak.label}** (${weak.value}/100). A 6-point gain here typically lifts the score 8–10 points and could unlock a higher GTBank tier.`);
+  }
   return {
-    headline: `Your score is in the top 18% of Lagos market traders.`,
-    body: [
-      `${TRADER.firstName}, your TradeScore of ${TRADER.score} reflects ${TRADER.streak} months of strong, consistent inflows from ${TRADER.transactions} customers.`,
-      `Your strongest factor is **${top.label}** (${top.value}/100) — ${top.desc.toLowerCase()}.`,
-      `The biggest lift remaining is **${weak.label}** (${weak.value}/100). If you can grow this 6 points, your score should cross 760 within 4–6 weeks, unlocking the ₦1M tier at 1.8% / month.`,
-    ],
-    delta: '+12 points this week',
+    headline: score >= 750 ? `Your score is in the top tier — ${score}/850.`
+            : score >= 650 ? `Solid base at ${score}/850 — room to climb.`
+            :                `Early days at ${score}/850 — let's build it.`,
+    body,
+    delta: live?.delta ?? null,
     confidence: 0.92,
   };
 }
 
 // ── 2. Loan recommendation ──────────────────────────────────────
-// Suggests an amount + term grounded in the trader's cashflow pattern.
+// Pulls real cashflow from the live store and picks an amount the user
+// can comfortably repay. Falls back to a sensible starter offer for
+// brand-new accounts (no inflows yet) instead of returning ₦0.
 export function recommendLoan(purpose = 'stock') {
-  const monthly = TRADER.monthlyRevenue;
-  const safeRepayMonthly = Math.round(monthly * 0.18); // ~18% of revenue
-  const recommended = Math.round(safeRepayMonthly * 2 / 5000) * 5000; // round to ₦5K
+  const live    = getScore();
+  const score   = live?.score ?? 700;
+  const monthly = live?.aggregates?.monthlyRevenue ?? 0;
+
+  // Pick the lowest-rate tier the user qualifies for.
+  const tier = [...LOAN_TIERS]
+    .filter(t => score >= t.minScore)
+    .sort((a, b) => a.rateMonthly - b.rateMonthly)[0] || LOAN_TIERS[0];
+
+  let amount;
+  if (monthly > 0) {
+    // 18% of revenue covers the monthly instalment; back out the principal
+    // for a 12-month loan at the tier rate, rounded to the nearest ₦5k.
+    const safeInstal = Math.round(monthly * 0.18);
+    const months = parseInt(tier.term, 10) || 12;
+    const principal = Math.round((safeInstal * months) / (1 + tier.rateMonthly * months / 100));
+    amount = Math.min(tier.max, Math.max(50_000, Math.round(principal / 5000) * 5000));
+  } else {
+    // No revenue history yet — show the smallest starter offer.
+    amount = Math.min(tier.max, 100_000);
+  }
 
   const reasons = {
     stock: [
-      'Stock-up loans match your inflow rhythm — you historically clear inventory in 35–45 days.',
-      `At ₦${recommended.toLocaleString()}, monthly repayment stays under 18% of average revenue.`,
-      'Lower default risk → 2.2% / month rate available.',
+      monthly > 0
+        ? `Stock-up loans match your inflow rhythm — at ₦${amount.toLocaleString('en-NG')}, the monthly instalment stays under 18% of your ₦${monthly.toLocaleString('en-NG')} average revenue.`
+        : `A small starter loan helps build a repayment history before larger tiers unlock. Send a few real payments first to qualify for more.`,
+      `${tier.name} fits your TradeScore — ${tier.rateMonthly}% / month over ${tier.term}.`,
+      'Repayments auto-debit from your Squad wallet — no missed instalments.',
     ],
     rent: [
-      'Rent loans should match your highest-income month so cash isn’t tight after.',
+      'Rent loans should match your highest-income month so cash isn\'t tight after.',
       'Your strongest months are typically Mar/Apr — schedule disbursement accordingly.',
     ],
     expansion: [
-      'Expansion loans need 90+ day terms — your growth (+18.4% MoM) suggests this is sustainable.',
-      'We project ₦1.06M monthly revenue by August — comfortably absorbs a ₦300K instalment.',
+      'Expansion loans need 90+ day terms.',
+      `At your current pace, repayment stays comfortable within the tier limit.`,
     ],
   };
 
   return {
-    amount: Math.min(recommended * 2, TRADER.loanEligible || 1_000_000),
-    term: '60 days',
-    rate: 2.2,
+    amount,
+    term: tier.term,
+    rate: tier.rateMonthly,
+    product: tier.name,
     reasons: reasons[purpose] || reasons.stock,
     confidence: 0.88,
   };
@@ -62,24 +118,12 @@ export function recommendLoan(purpose = 'stock') {
 // ── 3. Anomaly / opportunity alerts ─────────────────────────────
 export function detectAlerts() {
   return [
-    {
-      kind: 'opportunity',
-      icon: '🌱',
-      title: 'Inflow spike detected',
-      body: 'Customer payments jumped 24% over the last 7 days vs. your monthly average. This is a good window to re-stock — judging by the pattern, demand should hold for 10–14 more days.',
-    },
-    {
-      kind: 'risk',
-      icon: '⚠️',
-      title: 'Outflow concentration',
-      body: 'Stock purchases are 53% of outflows this month — historically you sit at ~38%. If a wholesaler delays, your buffer thins by Apr 26.',
-    },
-    {
-      kind: 'tip',
-      icon: '💡',
-      title: 'Score boost available',
-      body: 'Encouraging 8 more unique customers to pay via your Squad QR over the next 21 days will lift your Customer Diversity factor by 6+ points.',
-    },
+    { kind: 'opportunity', icon: '🌱', title: 'Inflow spike detected',
+      body: 'Customer payments jumped 24% over the last 7 days vs. your monthly average. This is a good window to re-stock.' },
+    { kind: 'risk', icon: '⚠️', title: 'Outflow concentration',
+      body: 'Stock purchases are 53% of outflows this month — historically you sit at ~38%.' },
+    { kind: 'tip', icon: '💡', title: 'Score boost available',
+      body: 'Encouraging 8 more unique customers to pay via your Squad QR over the next 21 days will lift your Customer Diversity factor by 6+ points.' },
   ];
 }
 
@@ -87,7 +131,7 @@ export function detectAlerts() {
 // Server categorises new transactions via Claude and persists the result in
 // transactions.category. This function prefers the server-assigned category;
 // the regex rules below are a fallback for the brief window between insert
-// and the next refresh, and for unauthenticated demo previews.
+// and the next refresh.
 const CAT_COLORS = {
   'Sales':     '#27AE60',
   'Inventory': '#E89B2A',
@@ -100,27 +144,33 @@ const CAT_COLORS = {
 };
 const CAT_RULES = [
   { match: /customer payment|loan disbursement to/i, category: 'Sales' },
-  { match: /loan disbursement/i, category: 'Loan' },
+  { match: /loan disbursement/i,        category: 'Loan' },
   { match: /stock|wholesale|inventory/i, category: 'Inventory' },
-  { match: /rent/i, category: 'Rent' },
-  { match: /transport|fuel/i, category: 'Logistics' },
-  { match: /electric|water|nepa/i, category: 'Utilities' },
+  { match: /rent/i,                      category: 'Rent' },
+  { match: /transport|fuel/i,            category: 'Logistics' },
+  { match: /electric|water|nepa/i,       category: 'Utilities' },
 ];
 export function categorize(tx) {
   if (tx.category) {
     return { category: tx.category, color: CAT_COLORS[tx.category] || CAT_COLORS.Other };
   }
   for (const r of CAT_RULES) {
-    if (r.match.test(tx.name)) return { category: r.category, color: CAT_COLORS[r.category] };
+    if (r.match.test(tx.name || '')) return { category: r.category, color: CAT_COLORS[r.category] };
   }
   return { category: 'Other', color: CAT_COLORS.Other };
 }
 
 // ── 5. Revenue forecast ─────────────────────────────────────────
-// Linear projection from last 7 months — looks like an ML output.
+// Linear projection from whatever revenue history the live score exposes,
+// falling back to a flat projection when we have no data.
 export function forecastNextMonths(n = 3) {
-  const xs = REV.map((_, i) => i);
-  const ys = REV;
+  const hist = getScore()?.aggregates?.revenueHistory || [];
+  const ys = hist.map(h => h.value).filter(v => Number.isFinite(v));
+  if (ys.length < 2) {
+    const monthly = getScore()?.aggregates?.monthlyRevenue || 0;
+    return Array.from({ length: n }, () => Math.round(monthly));
+  }
+  const xs = ys.map((_, i) => i);
   const xm = xs.reduce((a, b) => a + b) / xs.length;
   const ym = ys.reduce((a, b) => a + b) / ys.length;
   const slope = xs.reduce((s, x, i) => s + (x - xm) * (ys[i] - ym), 0) /
@@ -129,46 +179,128 @@ export function forecastNextMonths(n = 3) {
   return Array.from({ length: n }, (_, i) => Math.round(intercept + slope * (xs.length + i)));
 }
 
-// ── 6. Conversational AI assistant ──────────────────────────────
-// Light keyword router → contextual responses. Replace with a real
-// LLM call (Claude / GPT) and the chat UI keeps working unchanged.
+// ── 6. Conversational fallback ──────────────────────────────────
+// Only used when /api/chat is unreachable. Light keyword router → contextual
+// responses, all grounded in live store data so we never echo "₦0" or
+// "TradeScore null" when the network drops.
 export async function chatRespond(message, _history = []) {
   await aiDelay();
   const m = message.toLowerCase();
+  const user = getUser();
+  const live = getScore();
+  const firstName = user.firstName || 'there';
+  const score = live?.score;
+  const agg = live?.aggregates || {};
+  const monthly = agg.monthlyRevenue;
+  const txN = agg.transactions ?? 0;
 
   if (/score|trade.?score|credit/.test(m)) {
-    const ins = generateScoreInsight();
-    return `Your TradeScore is **${TRADER.score}** — ${ins.headline.toLowerCase()} The biggest single factor is your transaction volume (${FACTORS[0].value}/100). To push higher, focus on growing unique customers — 8 more this month adds about 6 points.`;
+    if (score == null) {
+      return `You don't have a TradeScore yet — we need a few payments to land in your virtual account first. Share your account number with a customer (or use **Receive money** on the Overview tab) and your score will appear within seconds of the first inflow.`;
+    }
+    const factors = live?.factors || [];
+    const top = [...factors].sort((a, b) => b.value - a.value)[0];
+    return `Your TradeScore is **${score}**, built from ${txN} ${txN === 1 ? 'transaction' : 'transactions'} on your Squad virtual account.${top ? ` Your strongest factor right now is **${top.label}** (${top.value}/100).` : ''} Growing unique customers and keeping inflows consistent are the fastest ways to push it higher.`;
   }
-  if (/loan|borrow|credit/.test(m)) {
+  if (/loan|borrow/.test(m)) {
     const r = recommendLoan('stock');
-    return `Based on your cashflow, I'd recommend ₦${r.amount.toLocaleString()} over ${r.term} at ${r.rate}% / month. ${r.reasons[0]} Want me to draft the application?`;
+    return `Based on your cashflow, I'd recommend **₦${r.amount.toLocaleString('en-NG')}** over ${r.term} at ${r.rate}% / month (${r.product}). ${r.reasons[0]}`;
   }
   if (/revenue|sales|income/.test(m)) {
+    if (!monthly) {
+      return `I'll be able to forecast revenue once a few payments come in. Right now there's no inflow history to project from.`;
+    }
     const f = forecastNextMonths(1)[0];
-    return `Your average monthly revenue is ₦${(TRADER.monthlyRevenue || 0).toLocaleString()}, growing ${TRADER.growth}% MoM. My forecast for next month is ~₦${f.toLocaleString()} — a healthy continuation of the upward trend you've held since December.`;
+    const growth = agg.growthPct;
+    return `Your monthly revenue is **₦${monthly.toLocaleString('en-NG')}**${growth != null ? `, ${growth > 0 ? 'growing' : 'down'} ${Math.abs(growth)}% MoM` : ''}. My forecast for next month is ~**₦${(f || monthly).toLocaleString('en-NG')}**.`;
   }
   if (/customer|client|payer/.test(m)) {
-    return `You served ${TRADER.transactions} unique customer interactions this month, mostly between 11am–3pm. Repeat-customer rate is ~62% — strong for ${TRADER.business.toLowerCase()}. Promoting your Squad QR at the till would push Customer Diversity higher.`;
+    const uN = agg.uniqueCustomers ?? 0;
+    if (!uN) return `No unique customers yet — once payments start arriving I'll be able to break down repeat vs new payers.`;
+    return `You've had **${uN}** unique payer${uN === 1 ? '' : 's'} so far across ${txN} ${txN === 1 ? 'transaction' : 'transactions'}. Growing this number lifts your Customer Diversity factor fastest.`;
   }
   if (/rate|interest|fee/.test(m)) {
-    return `Because your score is above 720, you qualify for our **Growth Credit** tier: 2.2% / month over 90 days. That's roughly 1/16th the cost of typical Nigerian loan apps for the same amount.`;
+    const tier = (score != null && [...LOAN_TIERS].filter(t => score >= t.minScore).sort((a, b) => a.rateMonthly - b.rateMonthly)[0]) || LOAN_TIERS[0];
+    return `Your best GTBank rate right now is **${tier.rateMonthly}% / month** under **${tier.name}** (${tier.aprNote || ''}), up to ₦${tier.max.toLocaleString('en-NG')}. Higher TradeScores unlock cheaper tiers.`;
   }
-  if (/repay|pay back|installment/.test(m)) {
+  if (/repay|pay back|installment|instalment/.test(m)) {
     return `Repayments auto-debit from your Squad wallet on the day of each scheduled instalment — you don't have to remember anything. If your inflow dips, we offer a one-time grace period without affecting your score.`;
   }
   if (/help|how|what can/.test(m)) {
-    return `I can help you understand your TradeScore, plan loans around your cashflow, spot risks in your spending pattern, and forecast your revenue. Try: *"How can I improve my score?"* or *"How much can I safely borrow?"*`;
+    return `I can explain your TradeScore, recommend a loan grounded in your cashflow, spot risks, and forecast your revenue. Try: *"How can I improve my score?"* or *"How much can I safely borrow?"*`;
   }
   if (/hi|hello|hey/.test(m)) {
-    return `Hello ${TRADER.firstName}! I'm your TradeScore assistant. I've reviewed your last ${TRADER.transactions} transactions — your business is in great shape. What would you like to know?`;
+    return score != null
+      ? `Hello ${firstName}! I've reviewed your last ${txN} ${txN === 1 ? 'transaction' : 'transactions'} — TradeScore ${score}. What would you like to know?`
+      : `Hello ${firstName}! Your dashboard is ready — once a few payments land we'll start grounding answers in real data. What would you like to know?`;
   }
-  // Default: echo a thoughtful, business-grounded answer.
-  return `That's a good question. Based on what I see in your Squad data — ₦${(TRADER.monthlyRevenue || 0).toLocaleString()} monthly inflow, ${TRADER.streak}-month consistency streak, ${TRADER.growth}% growth — I'd give a more specific answer if you tell me more about what you're trying to do. Are you thinking about a loan, growth, or risk?`;
+  // Default
+  return monthly
+    ? `Based on your Squad data — ₦${monthly.toLocaleString('en-NG')} monthly across ${txN} ${txN === 1 ? 'transaction' : 'transactions'}${score != null ? `, TradeScore ${score}` : ''} — I can answer more specifically if you tell me whether you're thinking about a loan, growth, or risk.`
+    : `Tell me a bit more about what you're trying to do — a loan, understanding your score, planning growth, or spotting risks. Once payments start landing I'll also have your real numbers to ground the advice in.`;
 }
 
-// ── 7. Streaming-style typed-out responder ──────────────────────
-// Used by the chat panel: emits tokens char-by-char to feel like an LLM.
+// ── 7. Worker matching (job-seeker side of the ecosystem) ───────
+// Trader describes a gig in free text; we pick the best 3 workers from the
+// pool by scoring skill overlap, proximity, rating, and language match.
+// Same AI primitive as loan recommendation — different objective.
+const SKILL_KEYWORDS = {
+  delivery:        ['deliver', 'drop', 'send', 'bring', 'take to', 'courier'],
+  'load-bearer':   ['load', 'heavy', 'lift', 'carry', 'bags', 'cartons'],
+  'market-run':    ['market', 'balogun', 'idumota', 'mile 12', 'oyingbo', 'stock from'],
+  'stock-running': ['stock', 'restock', 'replenish', 'inventory', 'goods'],
+  errand:          ['errand', 'run', 'pick up', 'collect', 'fetch'],
+  'shop-help':     ['shop', 'store', 'attend', 'help in', 'busy day', 'extra hand'],
+  cashier:         ['cashier', 'till', 'collect payment', 'pos'],
+  'customer-service': ['customer', 'serve', 'attend to'],
+  'inventory-count':  ['count', 'audit', 'stocktake', 'stock take'],
+  bookkeeping:     ['books', 'record', 'ledger', 'account'],
+  'social-media':  ['post', 'instagram', 'whatsapp status', 'flyer', 'photo'],
+  driver:          ['drive', 'car', 'long distance'],
+};
+function extractSkills(text) {
+  const t = (text || '').toLowerCase();
+  const hits = new Set();
+  for (const [skill, words] of Object.entries(SKILL_KEYWORDS)) {
+    if (words.some(w => t.includes(w))) hits.add(skill);
+  }
+  return [...hits];
+}
+export function matchWorkers(gigText, { maxResults = 3 } = {}) {
+  const user = getUser();
+  const traderLang = (user.language || 'English').toLowerCase();
+  const requested = extractSkills(gigText);
+
+  const scored = WORKERS.map(w => {
+    const skillOverlap = requested.length
+      ? requested.filter(s => w.skills.includes(s)).length / requested.length
+      : 0.4; // no keywords picked up — give every worker a baseline shot
+    const proximity = Math.max(0, 1 - w.distanceKm / 8); // 0km→1, 8km→0
+    const rating = (w.rating - 4) / 1;                   // 4.0★→0, 5.0★→1
+    const language = w.languages.some(l => l.toLowerCase() === traderLang) ? 1 : 0.5;
+
+    const score = Math.round(
+      (skillOverlap * 0.50 + proximity * 0.25 + rating * 0.15 + language * 0.10) * 100
+    );
+
+    const matchedSkills = requested.filter(s => w.skills.includes(s));
+    const whyParts = [];
+    if (matchedSkills.length) {
+      whyParts.push(`matches ${matchedSkills.map(s => `**${s.replace(/-/g, ' ')}**`).join(' + ')}`);
+    } else if (w.skills.length) {
+      whyParts.push(`general fit (${w.skills.slice(0, 2).join(', ')})`);
+    }
+    whyParts.push(`${w.distanceKm}km away`);
+    whyParts.push(`${w.rating}★ across ${w.gigsCompleted} gigs`);
+
+    return { ...w, matchScore: score, why: whyParts.join(' · '), matchedSkills };
+  });
+
+  scored.sort((a, b) => b.matchScore - a.matchScore);
+  return { requestedSkills: requested, candidates: scored.slice(0, maxResults) };
+}
+
+// ── 8. Streaming-style typed-out responder ──────────────────────
 export async function* streamReply(text, charDelay = 14) {
   for (const ch of text) {
     yield ch;

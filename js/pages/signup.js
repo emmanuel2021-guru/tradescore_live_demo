@@ -1,5 +1,5 @@
 import { el, icon } from '../utils.js';
-import { saveUser } from '../store.js';
+import { saveUser, clearUserScopedStorage } from '../store.js';
 import { api, setCid } from '../api.js';
 
 const STEPS = [
@@ -336,6 +336,10 @@ export function Signup({ navigate }) {
           mobile_num: data.mobile_num, dob: data.dob, bvn: data.bvn,
           gender: data.gender, address: data.address,
         });
+
+        // Fresh account on this browser — wipe any cached data from a prior
+        // user so we don't inherit their txs / sales / score / inventory.
+        clearUserScopedStorage();
 
         // Persist session + user
         setCid(resp.user.customer_identifier);

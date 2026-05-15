@@ -696,6 +696,61 @@ app.get('/api/loans', authed, (req, res) => {
   res.json({ loans });
 });
 
+// ── Hosted-checkout payment links (Squad /transaction/initiate) ───
+// Body: { amount, currency?, item_name?, qty?, customer_email?, customer_name?, reference? }
+// Returns the real Squad checkout URL so the merchant can share it with a
+// customer. Squad expects amount in kobo and an email — we fall back to the
+// merchant's own email when the cash-sale modal doesn't collect one.
+app.post('/api/payments/initiate', authed, async (req, res) => {
+  const b = req.body || {};
+  const amountNgn = Number(b.amount);
+  if (!Number.isFinite(amountNgn) || amountNgn <= 0)
+    return res.status(400).json({ error: 'amount (in naira) is required' });
+
+  const merchantId = process.env.SQUAD_MERCHANT_ID || 'TRADESCORE';
+  const reference = (b.reference && String(b.reference)) ||
+    `${merchantId}_C${req.user.id}${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+  const email        = (b.customer_email && String(b.customer_email).trim()) || req.user.email;
+  const customerName = (b.customer_name  && String(b.customer_name).trim())  ||
+                       `${req.user.first_name || 'Customer'} ${req.user.last_name || ''}`.trim();
+  const itemLabel    = b.item_name ? String(b.item_name).slice(0, 80) : 'Purchase';
+
+  try {
+    const resp = await squad.initiateTransaction({
+      amount: Math.round(amountNgn * 100), // Squad expects kobo
+      email,
+      currency: String(b.currency || 'NGN'),
+      initiate_type: 'inline',
+      transaction_ref: reference,
+      customer_name: customerName,
+      metadata: {
+        item_name: itemLabel,
+        qty: b.qty || 1,
+        merchant_user_id: req.user.id,
+      },
+    });
+
+    const data = resp?.data || {};
+    const url  = data.checkout_url || data.checkoutUrl;
+    if (!url) {
+      console.warn('[payments.initiate] Squad responded without checkout_url', resp);
+      return res.status(502).json({ error: 'Squad did not return a checkout URL', squad: resp });
+    }
+
+    res.json({
+      url,
+      reference: data.transaction_ref || reference,
+      expiresAt: Date.now() + 30 * 60 * 1000,
+      provider: 'squad',
+      status: 'pending',
+    });
+  } catch (e) {
+    console.warn('[payments.initiate] failed', { message: e.message, squad: e.squad });
+    res.status(502).json({ error: e.message, squad: e.squad });
+  }
+});
+
 // ── Withdrawals (trader → personal bank) ──────────────────────────
 // Wallet balance = sum of inflows − sum of outflows − sum of disbursed
 // withdrawals not yet recorded as a tx row. The transactions table already

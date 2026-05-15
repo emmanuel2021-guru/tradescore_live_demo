@@ -89,7 +89,7 @@ export function Shell({ panel, navigate }) {
       }, 'AI Insight'),
     ),
     el('div', { class: 'text-white text-[12.5px] leading-snug' },
-      'Ask anything about your score, cashflow, or borrowing — grounded in your real Squad data.'),
+      'Your inflows jumped 24% this week — good time to restock.'),
     el('div', {
       class: 'text-[11px] mt-2 font-semibold flex items-center gap-1',
       style: { color: '#E8FF8B' },
@@ -146,10 +146,7 @@ export function Shell({ panel, navigate }) {
     }, PANELS[panel]?.title || 'Overview'),
   ));
 
-  // ── Search (desktop) — wired ─────────────────────────────
-  // Submitting (or pressing ⌘K then typing + Enter) navigates to the
-  // Transactions tab with ?q=… in the URL. The Transactions panel reads
-  // that param on mount and pre-filters its list.
+  // Search (desktop) — submits to /app/transactions?q=…
   const searchInput = el('input', {
     class: 'input flex-1 !p-0 !border-none !bg-transparent text-[13.5px] !shadow-none',
     placeholder: 'Search transactions, refs, customers…',
@@ -168,7 +165,7 @@ export function Shell({ panel, navigate }) {
   });
   topbar.appendChild(searchForm);
 
-  // ⌘K (or Ctrl+K) focuses the search input
+  // ⌘K / Ctrl+K focuses the search input
   const keyHandler = (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
       e.preventDefault();
@@ -176,12 +173,9 @@ export function Shell({ panel, navigate }) {
     }
   };
   window.addEventListener('keydown', keyHandler);
-  // Clean up when the shell is destroyed via observer
   topbar.addEventListener('removed', () => window.removeEventListener('keydown', keyHandler));
 
-  // ── Right side action cluster ────────────────────────────
-  // Wallet pill — live balance visible across every tab. Click jumps to
-  // Overview where the full wallet card + Send money button live.
+  // Wallet pill — live balance from getWalletBalance()
   const walletPill = el('button', {
     class: 'hidden md:flex items-center gap-2.5 px-3.5 h-10 rounded-xl bg-white border border-line hover:bg-squad-paper text-ink-1 transition',
     onClick: () => navigate('/app/overview'),
@@ -206,7 +200,7 @@ export function Shell({ panel, navigate }) {
   repaintWallet();
   onTxsUpdated(() => repaintWallet());
 
-  // Bell: badge = inflows in last 24h. Clicking jumps to Transactions.
+  // Bell: badge = inflows in last 24h
   const bellBtn = iconBtn('bell', 0);
   bellBtn.addEventListener('click', () => navigate('/app/transactions'));
   const repaintBell = () => {
@@ -219,7 +213,6 @@ export function Shell({ panel, navigate }) {
   repaintBell();
   onTxsUpdated(() => repaintBell());
 
-  // Gear: opens the Profile tab.
   const gearBtn = iconBtn('gear');
   gearBtn.addEventListener('click', () => navigate('/app/profile'));
 
@@ -257,7 +250,6 @@ function iconBtn(name, badge) {
   return btn;
 }
 
-// Updates a badge dot on an iconBtn in place. Pass 0/null to hide it.
 function setIconBtnBadge(btn, badge) {
   const existing = btn.querySelector('[data-badge]');
   if (existing) existing.remove();

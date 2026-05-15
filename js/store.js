@@ -11,6 +11,8 @@ const TXS_KEY      = 'tradescore_txs';
 const SCORE_KEY    = 'tradescore_score';
 const SYNC_KEY     = 'tradescore_last_sync';
 const INSIGHTS_KEY = 'tradescore_insights';
+const PREFS_KEY    = 'tradescore_prefs';
+const SALES_KEY    = 'tradescore_sales';
 
 // Records the moment the last successful tx refresh happened (ISO string).
 // The dashboard reads this for its "Live · synced N min ago" badge.
@@ -47,8 +49,17 @@ export function saveUser(partial) {
   return getUser();
 }
 export function clearUser() {
-  localStorage.removeItem(USER_KEY);
+  clearUserScopedStorage();
   clearCid();
+}
+
+// Wipes every per-user cache so a fresh signup / login on the same browser
+// doesn't inherit the previous account's transactions, sales, score, etc.
+// Called from clearUser() (logout) and from the signup / login pages before
+// they stamp a new customer_identifier.
+export function clearUserScopedStorage() {
+  [USER_KEY, INV_KEY, TXS_KEY, SCORE_KEY, SYNC_KEY, INSIGHTS_KEY, SALES_KEY]
+    .forEach(k => localStorage.removeItem(k));
 }
 
 // Pulls the latest user from the backend (uses x-customer-id from localStorage).
@@ -266,6 +277,90 @@ export function removeInventoryItem(id) {
     api.inventory.remove(id).catch(err => console.warn('[inventory.remove] failed:', err));
   }
   return next;
+}
+
+// ── Preferences (notifications, AI tone, security PIN) ────────
+// Pure localStorage — these aren't backend-synced. Used by the Profile
+// panel's settings modals.
+export function getPrefs() {
+  return {
+    notifications: { email: true, sms: false, push: true },
+    ai: { tone: 'friendly', frequency: 'daily' },
+    security: { pin: null, twoFA: false },
+    ...(read(PREFS_KEY) || {}),
+  };
+}
+export function savePrefs(partial) {
+  const cur = getPrefs();
+  const next = { ...cur, ...partial };
+  write(PREFS_KEY, next);
+  return next;
+}
+
+// ── Cash-sale ledger ──────────────────────────────────────────
+// In-app cash sales recorded from the Inventory panel. These stack on top
+// of backend transactions in the unified getAllTransactions() feed below.
+export function getSales() { return read(SALES_KEY) || []; }
+
+export function recordSale(item, qty = 1) {
+  const items = getInventory();
+  const found = items.find(i => i.id === item.id);
+  if (!found || found.qty < qty) return { ok: false, reason: 'out_of_stock' };
+  updateInventoryItem(item.id, { qty: found.qty - qty });
+  const sale = {
+    id: 's_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    itemId: item.id,
+    name: item.name,
+    category: item.category,
+    price: item.price,
+    qty,
+    total: item.price * qty,
+    at: Date.now(),
+  };
+  write(SALES_KEY, [sale, ...getSales()]);
+  return { ok: true, sale };
+}
+
+export function getSalesToday() {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  return getSales().filter(s => s.at >= start.getTime());
+}
+
+function _saleToTx(s) {
+  return {
+    id: s.id,
+    name: `${s.qty}× ${s.name}`,
+    type: 'in',
+    amount: s.total,
+    time: _relativeTime(s.at),
+    ref: 'INV-' + s.id.slice(-6).toUpperCase(),
+    category: s.category,
+    _sale: true,
+    _at: s.at,
+  };
+}
+
+function _relativeTime(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  const yest = new Date(now); yest.setDate(now.getDate() - 1);
+  const isYest = d.toDateString() === yest.toDateString();
+  const hh = d.getHours();
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ampm = hh >= 12 ? 'PM' : 'AM';
+  const h12 = ((hh + 11) % 12) + 1;
+  const clock = `${h12}:${mm} ${ampm}`;
+  if (sameDay) return `Today, ${clock}`;
+  if (isYest) return `Yesterday, ${clock}`;
+  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }) + ', ' + clock;
+}
+
+// Unified transaction feed: in-app cash sales (newest first) + the live
+// /api/transactions cache. Powers the Overview and Transactions panels.
+export function getAllTransactions() {
+  const sales = getSales().map(_saleToTx);
+  return [...sales, ...getTxs()];
 }
 
 // ── Catalog of preset items per signup category ────────────────

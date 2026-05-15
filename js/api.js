@@ -85,6 +85,10 @@ export const api = {
     remove: (id)       => req(`/api/inventory/${id}`, { method: 'DELETE', auth: true }),
   },
 
+  payments: {
+    initiate: (body) => req('/api/payments/initiate', { method: 'POST', body, auth: true }),
+  },
+
   wallet:      ()     => req('/api/wallet', { auth: true }),
   withdrawals: {
     list:   ()        => req('/api/withdrawals', { auth: true }),

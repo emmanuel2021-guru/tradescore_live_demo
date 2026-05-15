@@ -1,6 +1,6 @@
 import { el, icon } from '../utils.js';
-import { api, setCid } from '../api.js';
-import { saveUser, refreshTxsFromServer, refreshScoreFromServer } from '../store.js';
+import { api, setCid, getCid } from '../api.js';
+import { saveUser, refreshTxsFromServer, refreshScoreFromServer, clearUserScopedStorage } from '../store.js';
 
 export function Login({ navigate }) {
   const root = el('div', { class: 'min-h-screen flex' });
@@ -123,6 +123,12 @@ export function Login({ navigate }) {
     try {
       const resp = await api.login({ email, password });
       const user = resp.user;
+
+      // Switching identities on this browser? Wipe the previous user's cache
+      // so we don't render their txs / sales / score before the server refresh lands.
+      if (getCid() && getCid() !== user.customer_identifier) {
+        clearUserScopedStorage();
+      }
 
       // Persist session + user shape the dashboard expects
       setCid(user.customer_identifier);
