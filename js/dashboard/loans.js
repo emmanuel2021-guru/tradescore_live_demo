@@ -1,4 +1,4 @@
-import { el, fmt, icon, toast } from '../utils.js';
+import { el, fmt, icon, toast, openModal } from '../utils.js';
 import { getUser, getScore, refreshTxsFromServer } from '../store.js';
 import { recommendLoan, loanTiersFor } from '../ai.js';
 import { api } from '../api.js';
@@ -531,36 +531,12 @@ function buildCalculator({ userScore, monthlyRevenue, preApproved, tiers, naviga
   const apply = el('button', {
     class: 'btn btn-lime w-full mt-5 !py-4 !text-[14px]',
   }, 'Apply now', icon('arrow-right'));
-  let applying = false;
-  apply.addEventListener('click', async () => {
-    if (applying) return;
-    applying = true;
-    apply.innerHTML = '';
-    apply.appendChild(el('span', { class: 'spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full' }));
-    apply.appendChild(el('span', {}, 'Applying…'));
-
+  apply.addEventListener('click', () => {
     // Pick the lowest-rate tier the user qualifies for at this amount.
     const eligible = LOAN_TIERS.filter(t => t.minScore <= userScore && t.max >= amount)
       .sort((a, b) => a.rateMonthly - b.rateMonthly);
     const tier = eligible[0];
-
-    try {
-      const resp = await api.loans.apply({
-        amount, term, purpose,
-        product: tier?.name,
-        rateMonthly: tier?.rateMonthly,
-      });
-      // Score+tx may move after disbursement — refresh in the background.
-      refreshTxsFromServer();
-      showLoanSuccess(amount, term, resp);
-    } catch (e) {
-      toast(e?.data?.error || e.message || 'Application failed',
-        { iconName: 'exclamation-triangle-fill', color: '#D43E3E' });
-      apply.innerHTML = '';
-      apply.appendChild(el('span', {}, 'Try again'));
-      apply.appendChild(icon('arrow-right'));
-      applying = false;
-    }
+    openDisbursementModal({ amount, term, purpose, tier });
   });
   summary.appendChild(apply);
 
@@ -617,6 +593,186 @@ function rowKv(k, v, highlight) {
       style: { color: highlight ? '#E8FF8B' : '#fff' },
     }, v),
   );
+}
+
+// ── Disbursement modal ────────────────────────────────────────
+// Loans can't auto-disburse to a wallet — they land in a real Nigerian
+// bank account. This modal collects bank + account number, runs a live
+// Squad account-name lookup (proof the integration is real), then
+// submits the loan with the full backend-required body.
+function openDisbursementModal({ amount, term, purpose, tier }) {
+  openModal(({ modal, close }) => {
+    let banks = [];
+    let bank = null;
+    let accountNumber = '';
+    let accountName = '';
+    let verifying = false;
+    let submitting = false;
+
+    modal.appendChild(el('div', { class: 'mb-4 pr-10' },
+      el('h3', {
+        class: 'font-display text-[20px] font-extrabold text-squad-deep',
+        style: { letterSpacing: '-0.02em' },
+      }, 'Where should we send it?'),
+      el('p', { class: 'text-[12.5px] text-ink-3 mt-0.5' },
+        'GTBank will disburse to a Nigerian bank account of your choice.'),
+    ));
+
+    // Loan summary card
+    const termMonths = parseInt(term, 10) || 12;
+    modal.appendChild(el('div', {
+      class: 'p-4 rounded-xl mb-4',
+      style: { background: '#F5F9F6', border: '1px solid #E2E8E4' },
+    },
+      el('div', { class: 'flex justify-between items-baseline' },
+        el('span', { class: 'text-[11px] uppercase tracking-wider font-bold text-ink-3' }, 'Loan amount'),
+        el('span', { class: 'font-display font-extrabold text-squad-deep text-[18px]' }, fmt(amount)),
+      ),
+      el('div', { class: 'flex justify-between text-[12px] text-ink-3 mt-1' },
+        el('span', {}, (tier?.name || 'GT Loan') + ' · ' + (tier?.rateMonthly || 1.5) + '% / mo'),
+        el('span', {}, termMonths + ' months · ' + purpose),
+      ),
+    ));
+
+    // Bank picker
+    modal.appendChild(el('div', { class: 'label' }, 'Bank'));
+    const bankSelect = el('select', { class: 'input', disabled: true });
+    bankSelect.appendChild(el('option', { value: '' }, 'Loading banks…'));
+    bankSelect.addEventListener('change', e => {
+      bank = banks.find(b => b.code === e.target.value) || null;
+      accountName = '';
+      acctNameEl.textContent = '';
+      paint();
+    });
+    modal.appendChild(bankSelect);
+
+    // Account number
+    modal.appendChild(el('div', { class: 'label mt-4' }, 'Account number'));
+    const acctInput = el('input', {
+      class: 'input', type: 'text', inputmode: 'numeric', maxlength: '10',
+      placeholder: '10-digit account number',
+    });
+    acctInput.addEventListener('input', e => {
+      acctInput.value = e.target.value.replace(/\D/g, '').slice(0, 10);
+      accountNumber = acctInput.value;
+      accountName = '';
+      acctNameEl.textContent = '';
+      paint();
+    });
+    modal.appendChild(acctInput);
+
+    // Verify row
+    const verifyRow = el('div', { class: 'mt-2 flex items-center justify-between gap-2' });
+    const acctNameEl = el('div', {
+      class: 'text-[12.5px] font-bold flex-1',
+      style: { color: '#0B6E4F' },
+    });
+    const verifyBtn = el('button', {
+      class: 'btn btn-ghost !py-2 !px-3 !text-[12px]',
+      type: 'button',
+    }, icon('check-circle'), 'Verify');
+    verifyBtn.addEventListener('click', async () => {
+      if (verifying) return;
+      if (!bank || accountNumber.length !== 10) {
+        toast('Pick a bank and enter a 10-digit account number',
+          { iconName: 'exclamation-triangle-fill', color: '#D43E3E' });
+        return;
+      }
+      verifying = true;
+      verifyBtn.innerHTML = '';
+      verifyBtn.appendChild(el('span', { class: 'spin inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full' }));
+      verifyBtn.appendChild(el('span', {}, 'Verifying…'));
+      try {
+        const resp = await api.loans.lookupAccount({
+          bank_code: bank.code,
+          account_number: accountNumber,
+        });
+        accountName = resp.account_name || resp.data?.account_name || '';
+        if (!accountName) throw new Error('No name returned');
+        acctNameEl.textContent = '✓ ' + accountName;
+      } catch (e) {
+        accountName = '';
+        acctNameEl.textContent = '';
+        toast(e?.data?.error || e.message || 'Could not verify',
+          { iconName: 'exclamation-triangle-fill', color: '#D43E3E' });
+      } finally {
+        verifying = false;
+        verifyBtn.innerHTML = '';
+        verifyBtn.appendChild(icon('check-circle'));
+        verifyBtn.appendChild(el('span', {}, accountName ? 'Re-verify' : 'Verify'));
+        paint();
+      }
+    });
+    verifyRow.appendChild(acctNameEl);
+    verifyRow.appendChild(verifyBtn);
+    modal.appendChild(verifyRow);
+
+    // Disburse button
+    const submitBtn = el('button', {
+      class: 'btn btn-primary w-full mt-5 !py-3.5',
+      type: 'button',
+    }, icon('lightning-charge-fill'), 'Disburse ' + fmt(amount));
+    submitBtn.addEventListener('click', async () => {
+      if (submitting) return;
+      if (!bank || !accountNumber || !accountName) {
+        toast('Verify the destination account first',
+          { iconName: 'exclamation-triangle-fill', color: '#D43E3E' });
+        return;
+      }
+      submitting = true;
+      submitBtn.innerHTML = '';
+      submitBtn.appendChild(el('span', { class: 'spin inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full' }));
+      submitBtn.appendChild(el('span', {}, 'Disbursing…'));
+      try {
+        const resp = await api.loans.apply({
+          amount_kobo: amount * 100,
+          term_days: termMonths * 30,
+          rate_monthly: tier?.rateMonthly ?? 1.5,
+          purpose,
+          product: tier?.name,
+          bank_code: bank.code,
+          account_number: accountNumber,
+          account_name: accountName,
+        });
+        refreshTxsFromServer();
+        close();
+        showLoanSuccess(amount, term, resp);
+      } catch (e) {
+        toast(e?.data?.error || e.message || 'Application failed',
+          { iconName: 'exclamation-triangle-fill', color: '#D43E3E' });
+        submitting = false;
+        submitBtn.innerHTML = '';
+        submitBtn.appendChild(icon('lightning-charge-fill'));
+        submitBtn.appendChild(el('span', {}, 'Try again'));
+      }
+    });
+    modal.appendChild(submitBtn);
+
+    function paint() {
+      const ready = bank && accountName && !submitting;
+      submitBtn.disabled = !ready;
+      submitBtn.style.opacity = ready ? '1' : '0.6';
+    }
+    paint();
+
+    // Load banks asynchronously
+    api.loans.banks()
+      .then(resp => {
+        banks = resp.banks || resp || [];
+        bankSelect.innerHTML = '';
+        bankSelect.disabled = false;
+        bankSelect.appendChild(el('option', { value: '' }, 'Select a bank'));
+        banks.forEach(b => {
+          bankSelect.appendChild(el('option', { value: b.code }, b.name));
+        });
+      })
+      .catch(e => {
+        bankSelect.innerHTML = '';
+        bankSelect.appendChild(el('option', { value: '' }, 'Could not load banks'));
+        toast('Could not load banks: ' + (e.message || ''),
+          { iconName: 'exclamation-triangle-fill', color: '#D43E3E' });
+      });
+  });
 }
 
 // ── Success modal ────────────────────────────────────────────

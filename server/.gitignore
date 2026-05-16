@@ -1,2 +1,5 @@
 node_modules/
 .env
+tradescore.db
+tradescore.db-shm
+tradescore.db-wal
