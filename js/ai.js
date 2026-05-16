@@ -8,8 +8,15 @@
 // from the all-null TRADER mock in data.js — otherwise we get "₦0" and
 // "TradeScore null" leaking into the UI.
 
-import { LOAN_TIERS, WORKERS } from './data.js';
+import { LOAN_TIERS, WORKER_LOAN_TIERS, WORKERS } from './data.js';
 import { getUser, getScore } from './store.js';
+
+// Picks the right product family based on user role. Traders see SME products
+// (GT Smart Advance, MaxPlus, etc.); workers see microcredit (Starter Boost,
+// Skills Loan, Asset Loan). Same TradeScore underwrites both.
+export function loanTiersFor(role) {
+  return role === 'worker' ? WORKER_LOAN_TIERS : LOAN_TIERS;
+}
 
 // Simulated network latency (ms). Used by the chat panel for typing effect.
 const MIN_DELAY = 450;
@@ -68,26 +75,40 @@ export function recommendLoan(purpose = 'stock') {
   const live    = getScore();
   const score   = live?.score ?? 700;
   const monthly = live?.aggregates?.monthlyRevenue ?? 0;
+  const role    = getUser().role || 'trader';
+  const tiers   = loanTiersFor(role);
 
   // Pick the lowest-rate tier the user qualifies for.
-  const tier = [...LOAN_TIERS]
+  const tier = [...tiers]
     .filter(t => score >= t.minScore)
-    .sort((a, b) => a.rateMonthly - b.rateMonthly)[0] || LOAN_TIERS[0];
+    .sort((a, b) => a.rateMonthly - b.rateMonthly)[0] || tiers[0];
+
+  // Workers cap at much smaller principals — match their earning rhythm.
+  const minStarter = role === 'worker' ? 5_000  : 50_000;
+  const fallback   = role === 'worker' ? 15_000 : 100_000;
 
   let amount;
   if (monthly > 0) {
-    // 18% of revenue covers the monthly instalment; back out the principal
-    // for a 12-month loan at the tier rate, rounded to the nearest ₦5k.
+    // 18% of monthly cashflow covers the instalment; back out the principal
+    // for the tier's term, rounded to the nearest ₦1k (worker) / ₦5k (trader).
     const safeInstal = Math.round(monthly * 0.18);
-    const months = parseInt(tier.term, 10) || 12;
+    const months = Math.max(1, parseInt(tier.term, 10) || 12) /
+                   (tier.term.includes('day') ? 30 : 1);
     const principal = Math.round((safeInstal * months) / (1 + tier.rateMonthly * months / 100));
-    amount = Math.min(tier.max, Math.max(50_000, Math.round(principal / 5000) * 5000));
+    const round = role === 'worker' ? 1_000 : 5_000;
+    amount = Math.min(tier.max, Math.max(minStarter, Math.round(principal / round) * round));
   } else {
-    // No revenue history yet — show the smallest starter offer.
-    amount = Math.min(tier.max, 100_000);
+    amount = Math.min(tier.max, fallback);
   }
 
-  const reasons = {
+  const workerReasons = [
+    monthly > 0
+      ? `${tier.name} matches your earning rhythm — at ₦${amount.toLocaleString('en-NG')}, the instalment stays under 18% of your ₦${monthly.toLocaleString('en-NG')} monthly gig income.`
+      : `Complete a few more gigs to unlock larger tiers. Every gig paid via Squad lifts your TradeScore.`,
+    `${tier.name} — ${tier.rateMonthly}% / month over ${tier.term}. ${tier.desc}.`,
+    'Repayments auto-debit from your Squad wallet on each pay-out.',
+  ];
+  const traderReasons = {
     stock: [
       monthly > 0
         ? `Stock-up loans match your inflow rhythm — at ₦${amount.toLocaleString('en-NG')}, the monthly instalment stays under 18% of your ₦${monthly.toLocaleString('en-NG')} average revenue.`
@@ -104,13 +125,16 @@ export function recommendLoan(purpose = 'stock') {
       `At your current pace, repayment stays comfortable within the tier limit.`,
     ],
   };
+  const reasons = role === 'worker'
+    ? workerReasons
+    : (traderReasons[purpose] || traderReasons.stock);
 
   return {
     amount,
     term: tier.term,
     rate: tier.rateMonthly,
     product: tier.name,
-    reasons: reasons[purpose] || reasons.stock,
+    reasons,
     confidence: 0.88,
   };
 }

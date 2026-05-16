@@ -67,6 +67,7 @@ export const api = {
   me:              ()       => req('/api/me', { auth: true }),
   transactions:    ()       => req('/api/transactions', { auth: true }),
   score:           ()       => req('/api/score', { auth: true }),
+  scoreHistory:    ()       => req('/api/score/history', { auth: true }),
   insights:        ()       => req('/api/insights', { auth: true }),
   chat:            (body)   => req('/api/chat', { method: 'POST', body, auth: true }),
   simulatePayment: (amount) => req('/api/dev/simulate-payment', { method: 'POST', body: { amount }, auth: true }),
@@ -94,4 +95,11 @@ export const api = {
     list:   ()        => req('/api/withdrawals', { auth: true }),
     apply:  (body)    => req('/api/withdrawals', { method: 'POST', body, auth: true }),
   },
+
+  workers:     ()     => req('/api/workers', { auth: true }),
+  gigs: {
+    match:     (body) => req('/api/gigs/match',      { method: 'POST', body, auth: true }),
+    payWorker: (body) => req('/api/gigs/pay-worker', { method: 'POST', body, auth: true }),
+  },
+  network:     ()     => req('/api/network', { auth: true }),
 };

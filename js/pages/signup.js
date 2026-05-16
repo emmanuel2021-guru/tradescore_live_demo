@@ -9,9 +9,20 @@ const STEPS = [
   { key: 'done',     title: 'You’re in!',                  sub: 'Your virtual account is live and your AI is analysing.' },
 ];
 
+// Step copy adapts to the chosen role — workers don't run a shop.
+const STEP_COPY = {
+  trader: {
+    business: { title: 'Tell us about your shop',     sub: 'So we can tailor your TradeScore.' },
+  },
+  worker: {
+    business: { title: 'Tell us about your work',     sub: 'So traders nearby can match with you.' },
+  },
+};
+
 export function Signup({ navigate }) {
   let step = 0;
   const data = {
+    role: 'trader',
     first_name: '', last_name: '', middle_name: '',
     email: '', password: '',
     business_name: '', category: 'Fashion', location: '', mobile_num: '',
@@ -117,8 +128,10 @@ export function Signup({ navigate }) {
     progress.querySelectorAll('[data-step-bar]').forEach((bar, i) => {
       bar.style.background = i <= step ? '#0B6E4F' : '#E2E8E4';
     });
-    title.textContent = STEPS[step].title;
-    sub.textContent   = STEPS[step].sub;
+    const stepKey = STEPS[step].key;
+    const override = STEP_COPY[data.role]?.[stepKey];
+    title.textContent = override?.title ?? STEPS[step].title;
+    sub.textContent   = override?.sub   ?? STEPS[step].sub;
   }
 
   function render() {
@@ -142,6 +155,38 @@ export function Signup({ navigate }) {
   // ── Step 1: Account ─────────────────────────────────────
   function stepAccount() {
     const wrap = el('div', { class: 'space-y-4' });
+
+    // Role toggle — first thing the user picks. Drives copy + form fields later.
+    const roleWrap = el('div');
+    roleWrap.appendChild(el('label', { class: 'label' }, 'I want to…'));
+    const roleRow = el('div', { class: 'grid grid-cols-2 gap-2' });
+    [
+      { v: 'trader', label: 'Sell as a trader',   sub: 'Run a shop, sell goods, build credit from customer payments.' },
+      { v: 'worker', label: 'Work as a job seeker', sub: 'Get hired for gigs, earn through Squad, build your TradeScore.' },
+    ].forEach(opt => {
+      const btn = el('button', {
+        class: 'p-3.5 rounded-xl text-left tap transition-all',
+        'data-role': opt.v,
+      },
+        el('div', { class: 'font-bold text-[13.5px]' }, opt.label),
+        el('div', { class: 'text-[11.5px] mt-0.5 leading-snug', style: { opacity: '0.78' } }, opt.sub),
+      );
+      btn.addEventListener('click', () => { data.role = opt.v; paintRole(); });
+      roleRow.appendChild(btn);
+    });
+    function paintRole() {
+      roleRow.querySelectorAll('[data-role]').forEach(b => {
+        const a = b.dataset.role === data.role;
+        b.style.background = a ? '#0B6E4F' : '#fff';
+        b.style.color      = a ? '#fff'    : '#4A5C56';
+        b.style.border     = a ? '1px solid #0B6E4F' : '1px solid #E2E8E4';
+        b.style.boxShadow  = a ? '0 4px 14px rgba(11,110,79,0.22)' : 'none';
+      });
+    }
+    paintRole();
+    roleWrap.appendChild(roleRow);
+    wrap.appendChild(roleWrap);
+
     const row = el('div', { class: 'grid grid-cols-2 gap-3' });
     const firstField = field('First name', 'first_name', 'Funmi');
     const lastField  = field('Last name',  'last_name',  'Adeyemi');
@@ -183,40 +228,69 @@ export function Signup({ navigate }) {
     return wrap;
   }
 
-  // ── Step 2: Business ────────────────────────────────────
+  // ── Step 2: Business (trader) / Work (worker) ──────────
   function stepBusiness() {
+    const isWorker = data.role === 'worker';
     const wrap = el('div', { class: 'space-y-4' });
-    const nameField = field('Business name', 'business_name', "e.g. Funmi's Fashion Fabrics");
+
+    // Trader: "Business name" + category grid.
+    // Worker: "What kind of work?" — short free-text + skill chips reused
+    //         as the business_name field so we don't change the schema.
+    const nameField = field(
+      isWorker ? 'What kind of work can you do?' : 'Business name',
+      'business_name',
+      isWorker ? 'e.g. Delivery, shop help, market runs' : "e.g. Funmi's Fashion Fabrics",
+    );
     nameField.input.value = data.business_name;
     wrap.appendChild(nameField.field);
 
-    const catWrap = el('div');
-    catWrap.appendChild(el('label', { class: 'label' }, 'Category'));
-    const cats = ['Fashion', 'Food & Drinks', 'Electronics', 'Beauty', 'Groceries', 'Other'];
-    const grid = el('div', { class: 'grid grid-cols-3 gap-2' });
-    cats.forEach(c => {
-      const btn = el('button', {
-        class: 'py-3 px-3 rounded-xl text-[13px] font-bold tap text-center transition-all',
-        'data-cat': c,
-      }, c);
-      btn.addEventListener('click', () => {
-        data.category = c;
-        grid.querySelectorAll('[data-cat]').forEach(b => paintCat(b));
+    if (isWorker) {
+      // Skill chips — clicking appends to the work-description field.
+      const chips = el('div', { class: 'flex flex-wrap gap-1.5' },
+        ...['Delivery', 'Load-bearing', 'Shop help', 'Market runs', 'Cashier', 'Errands', 'Bookkeeping', 'Driver']
+          .map(s => el('button', {
+            class: 'chip cursor-pointer',
+            style: { background: '#F5F9F6', color: '#0B6E4F', fontSize: '11px', padding: '4px 9px' },
+            onClick: () => {
+              const cur = nameField.input.value.trim();
+              nameField.input.value = cur ? `${cur}, ${s}` : s;
+            },
+          }, '+ ' + s)),
+      );
+      wrap.appendChild(chips);
+    } else {
+      const catWrap = el('div');
+      catWrap.appendChild(el('label', { class: 'label' }, 'Category'));
+      const cats = ['Fashion', 'Food & Drinks', 'Electronics', 'Beauty', 'Groceries', 'Other'];
+      const grid = el('div', { class: 'grid grid-cols-3 gap-2' });
+      cats.forEach(c => {
+        const btn = el('button', {
+          class: 'py-3 px-3 rounded-xl text-[13px] font-bold tap text-center transition-all',
+          'data-cat': c,
+        }, c);
+        btn.addEventListener('click', () => {
+          data.category = c;
+          grid.querySelectorAll('[data-cat]').forEach(b => paintCat(b));
+        });
+        function paintCat(b) {
+          const a = b.dataset.cat === data.category;
+          b.style.background = a ? '#0B6E4F' : '#fff';
+          b.style.color      = a ? '#fff' : '#4A5C56';
+          b.style.border     = a ? '1px solid #0B6E4F' : '1px solid #E2E8E4';
+          b.style.boxShadow  = a ? '0 4px 14px rgba(11,110,79,0.25)' : 'none';
+        }
+        paintCat(btn);
+        grid.appendChild(btn);
       });
-      function paintCat(b) {
-        const a = b.dataset.cat === data.category;
-        b.style.background = a ? '#0B6E4F' : '#fff';
-        b.style.color      = a ? '#fff' : '#4A5C56';
-        b.style.border     = a ? '1px solid #0B6E4F' : '1px solid #E2E8E4';
-        b.style.boxShadow  = a ? '0 4px 14px rgba(11,110,79,0.25)' : 'none';
-      }
-      paintCat(btn);
-      grid.appendChild(btn);
-    });
-    catWrap.appendChild(grid);
-    wrap.appendChild(catWrap);
+      catWrap.appendChild(grid);
+      wrap.appendChild(catWrap);
+    }
 
-    const locField = field('Shop location', 'location', 'e.g. Balogun Market, Lagos');
+    const locField = field(
+      isWorker ? 'Where are you based?' : 'Shop location',
+      'location',
+      'e.g. Yaba, Lagos',
+    );
     locField.input.value = data.location;
     wrap.appendChild(locField.field);
 
@@ -330,6 +404,7 @@ export function Signup({ navigate }) {
       try {
         console.log('[signup] calling /api/signup');
         const resp = await api.signup({
+          role: data.role,
           first_name: data.first_name, last_name: data.last_name, middle_name: data.middle_name,
           email: data.email, password: data.password,
           business_name: data.business_name, category: data.category, location: data.location,
@@ -345,10 +420,12 @@ export function Signup({ navigate }) {
         setCid(resp.user.customer_identifier);
         saveUser({
           customer_identifier: resp.user.customer_identifier,
+          role: resp.user.role || data.role,
           name: `${resp.user.first_name} ${resp.user.last_name}`,
           firstName: resp.user.first_name,
           email: resp.user.email,
-          business: resp.user.business_name || `${resp.user.first_name}’s Shop`,
+          business: resp.user.business_name
+            || (data.role === 'worker' ? 'Job seeker' : `${resp.user.first_name}’s Shop`),
           category: resp.user.category,
           location: resp.user.location,
           squadWallet: resp.user.virtual_account_number || null,

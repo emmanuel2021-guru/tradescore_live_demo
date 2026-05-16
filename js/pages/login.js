@@ -134,10 +134,12 @@ export function Login({ navigate }) {
       setCid(user.customer_identifier);
       saveUser({
         customer_identifier: user.customer_identifier,
+        role: user.role || 'trader',
         name: `${user.first_name} ${user.last_name}`,
         firstName: user.first_name,
         email: user.email,
-        business: user.business_name || `${user.first_name}’s Shop`,
+        business: user.business_name
+          || (user.role === 'worker' ? 'Job seeker' : `${user.first_name}’s Shop`),
         category: user.category,
         location: user.location,
         squadWallet: user.virtual_account_number || null,

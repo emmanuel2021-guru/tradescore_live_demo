@@ -173,6 +173,76 @@ export async function categorizeTransactionsBatch(txs) {
   }
 }
 
+// ── Gig matching (Claude) ──────────────────────────────────────
+// Claude ranks a pool of onboarded workers against a free-text gig
+// description. We pass minimal worker context (id, name, bio, score, gigs
+// completed, location) and Claude returns a structured ranking with
+// natural-language reasoning. This is the "intelligent matching" layer
+// Challenge 02's brief asks for — same engine that powers the chat.
+const MATCH_SYSTEM = `You match Nigerian informal-economy gig requests to a pool of vetted workers.
+
+You will receive:
+1. A short free-text description of the gig (what the trader needs done).
+2. A JSON array of candidate workers, each with: id, name, bio (their skills in free text), location, tradeScore (350-850), gigsCompleted, distanceKm.
+
+For each candidate, score how well they fit the gig from 0 to 100. Consider:
+- Skill match: does their bio mention the kind of work the gig needs?
+- Distance: closer is better (under 3km is excellent, over 6km is weak).
+- Track record: more gigs completed = more reliable.
+- TradeScore: workers with higher scores have proven payment-history reliability.
+
+Output STRICT JSON only — no surrounding text, no code fences. Schema:
+{
+  "matches": [
+    {
+      "id": "<worker id from input>",
+      "match_score": <integer 0-100>,
+      "matched_skills": ["delivery", "market-run", ...],
+      "why": "1 short sentence explaining the rank (max 110 chars). Mention the key skill match and one other signal (distance, track record, or score)."
+    }
+  ]
+}
+
+Return ALL candidates sorted by match_score descending. Don't drop any.`;
+
+export async function matchWorkersWithAI({ gigText, workers, amount }) {
+  if (!gigText || !Array.isArray(workers) || !workers.length) {
+    return { matches: [], source: 'empty' };
+  }
+  const compact = workers.map(w => ({
+    id:            w.id,
+    name:          w.name,
+    bio:           w.bio,
+    location:      w.location,
+    tradeScore:    w.tradeScore,
+    gigsCompleted: w.gigsCompleted,
+    distanceKm:    w.distanceKm,
+  }));
+
+  const userMsg = JSON.stringify({ gig: gigText, amount_naira: amount, candidates: compact });
+
+  try {
+    const resp = await client.messages.create({
+      model: MODEL,
+      max_tokens: 800,
+      system: [
+        { type: 'text', text: MATCH_SYSTEM, cache_control: { type: 'ephemeral' } },
+      ],
+      messages: [{ role: 'user', content: userMsg }],
+    });
+    const raw = resp.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+    const cleaned = raw.replace(/^```(?:json)?\s*|\s*```$/g, '').trim();
+    const parsed = JSON.parse(cleaned);
+    if (!parsed?.matches || !Array.isArray(parsed.matches)) {
+      throw new Error('No matches array in response');
+    }
+    return { matches: parsed.matches, source: 'claude', usage: resp.usage, model: MODEL };
+  } catch (e) {
+    console.warn('[match] Claude matching failed:', e.message);
+    return { matches: [], source: 'error', error: e.message };
+  }
+}
+
 // ── Dashboard insights ─────────────────────────────────────────
 // Generates Claude-written narratives for three dashboard cards (AI Insight
 // banner, loan recommendation "why", smart-alert bodies) in ONE call returning

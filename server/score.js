@@ -121,7 +121,14 @@ const WEIGHTS = [
 const scoreFromComposite = (c) => Math.round(350 + c * 5);
 
 export function computeScore(userId) {
-  const allTxs  = getUserTxs(userId);
+  return computeScoreFromTxs(getUserTxs(userId));
+}
+
+// Same scoring logic, but operates on a caller-supplied tx list. Used by the
+// score-history endpoint to compute a *retrospective* score at each past
+// month-end by filtering txs up to that date — that's what the "Your
+// TradeScore journey" chart on the Loans panel renders.
+export function computeScoreFromTxs(allTxs) {
   const inflows = allTxs.filter(t => t.direction === 'in');
 
   // No inflows → no credit signal. Returning null tells the UI to show

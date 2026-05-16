@@ -82,10 +82,10 @@ export function Landing({ navigate }) {
   copy.appendChild(el('h1', {
     class: 'font-display text-[40px] sm:text-[52px] lg:text-[64px] font-extrabold text-squad-deep leading-[1.02]',
     style: { letterSpacing: '-0.035em' },
-  }, 'Credit for every', el('br'), 'Nigerian trader.'));
+  }, 'Credit for every', el('br'), 'informal worker.'));
   copy.appendChild(el('p', {
     class: 'mt-5 text-[16px] lg:text-[17px] text-ink-2 leading-relaxed max-w-[540px]',
-  }, "Your daily Squad transactions become a real credit profile. Get fair loans in minutes — no paperwork, no collateral, no 40% APR traps. We use AI to score, recommend, and protect your business as it grows."));
+  }, "Traders hire workers. Workers earn through Squad. Every payment becomes credit history. The TradeScore engine underwrites both sides — informal market traders and the job seekers they hire — so fair loans reach the people the banks have always missed."));
 
   const heroBtns = el('div', { class: 'mt-7 flex flex-wrap gap-3' });
   heroBtns.appendChild(el('button', {

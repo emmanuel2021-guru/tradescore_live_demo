@@ -108,6 +108,50 @@ export const WORKERS = [
   },
 ];
 
+// Microcredit products for workers / job seekers. Smaller principals, shorter
+// terms, framed around real informal-economy use cases (transport advance,
+// skills training, asset purchase). Same underwriting engine — same TradeScore
+// gates each tier — but the products are appropriate to the user's earning
+// scale. This is the financial-inclusion side of the loop.
+export const WORKER_LOAN_TIERS = [
+  {
+    name: 'GT Starter Boost',
+    bank: 'GTBank',
+    minScore: 550,
+    max: 20_000,
+    rateMonthly: 2.5,
+    aprNote: '30% p.a.',
+    term: '30 days',
+    desc: 'Transport advance, airtime, urgent supplies',
+    fees: '₦500 flat origination',
+    icon: 'lightning-charge-fill',
+  },
+  {
+    name: 'GT Skills Loan',
+    bank: 'GTBank',
+    minScore: 620,
+    max: 80_000,
+    rateMonthly: 2.0,
+    aprNote: '24% p.a.',
+    term: '60 days',
+    desc: 'Certifications, training, vocational courses',
+    fees: '1% mgmt fee',
+    icon: 'mortarboard-fill',
+  },
+  {
+    name: 'GT Asset Loan',
+    bank: 'GTBank',
+    minScore: 700,
+    max: 300_000,
+    rateMonthly: 1.8,
+    aprNote: '21.6% p.a.',
+    term: '90 days',
+    desc: 'Bike, equipment, tools for self-employment',
+    fees: '1% mgmt fee · 1% insurance',
+    icon: 'tools',
+  },
+];
+
 // Real GTBank loan products (sourced from gtbank.com SME & retail offerings).
 // Rates are GTBank's published monthly equivalents; tenors are real GTBank terms.
 // Management fee 1% + insurance ~1% apply on disbursement (shown in calculator note).

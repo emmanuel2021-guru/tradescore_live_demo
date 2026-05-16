@@ -72,6 +72,34 @@ const MONTHLY = [
   { inflows: 11, revenue:  770_000, stock: 195_000, rent: 80_000, utilities: 13_500, logistics: 10_400 },
 ];
 
+// ── Worker accounts (job-seeker side of the loop) ────────────────
+// Each one gets a real Squad VA + a small earnings history so judges can
+// log in as them and see a populated dashboard. They reuse the same BVN
+// triplet because Squad's sandbox lets a single test BVN back many VAs.
+const WORKERS = [
+  {
+    email: 'tunde.worker@tradescore.ng', password: 'demo1234',
+    first_name: 'Tunde',    last_name: 'Bello',
+    business_name: 'Delivery, market runs, load-bearing',
+    location: 'Yaba, Lagos',
+    gigs: [22000, 18500, 15000, 12500, 9500, 11000, 7500, 8500],
+  },
+  {
+    email: 'chiamaka.worker@tradescore.ng', password: 'demo1234',
+    first_name: 'Chiamaka', last_name: 'Eze',
+    business_name: 'Shop help, cashier, customer service',
+    location: 'Surulere, Lagos',
+    gigs: [14000, 11500, 9200, 8400, 12000],
+  },
+  {
+    email: 'ibrahim.worker@tradescore.ng', password: 'demo1234',
+    first_name: 'Ibrahim',  last_name: 'Musa',
+    business_name: 'Delivery, stock running, market runs',
+    location: 'Mushin, Lagos',
+    gigs: [20000, 16800, 13200, 15500, 11900, 10000, 8800, 12400, 9100, 7600],
+  },
+];
+
 // ── Inventory (10 items from Fashion catalog) ────────────────────
 const INVENTORY = [
   { name: 'Ankara fabric',  category: 'Fashion', price: 4500,  qty: 38 },
@@ -115,7 +143,10 @@ function timestampInMonth(monthsBack, dayInMonth) {
 // ── Squad VA provisioning ────────────────────────────────────────
 // Same flow the live signup endpoint uses. On Squad failure we fall back
 // to a deterministic fake VA so the seed still produces a usable account.
-async function provisionVirtualAccount(customer_identifier) {
+// `profile` defaults to the trader PERSONA but workers pass their own
+// first_name/last_name/email (BVN+DOB are shared because Squad sandbox
+// allows the same test BVN across many virtual accounts).
+async function provisionVirtualAccount(customer_identifier, profile = PERSONA) {
   if (!process.env.SQUAD_SECRET_KEY) {
     console.warn('  ⚠ SQUAD_SECRET_KEY not set — falling back to demo VA');
     return { number: '90' + Math.floor(Math.random() * 1e8).toString().padStart(8, '0'),
@@ -124,14 +155,14 @@ async function provisionVirtualAccount(customer_identifier) {
   try {
     const payload = {
       customer_identifier,
-      first_name: PERSONA.first_name,
-      last_name:  PERSONA.last_name,
-      mobile_num: PERSONA.mobile_num,
-      dob:        PERSONA.dob,
-      email:      PERSONA.email,
-      bvn:        PERSONA.bvn,
-      gender:     PERSONA.gender,
-      address:    PERSONA.address,
+      first_name: profile.first_name,
+      last_name:  profile.last_name,
+      mobile_num: profile.mobile_num || PERSONA.mobile_num,
+      dob:        profile.dob        || PERSONA.dob,
+      email:      profile.email,
+      bvn:        profile.bvn        || PERSONA.bvn,
+      gender:     profile.gender     || PERSONA.gender,
+      address:    profile.address    || PERSONA.address,
       beneficiary_account: process.env.SQUAD_BENEFICIARY_ACCOUNT,
     };
     console.log('  → calling Squad /virtual-account …');
@@ -333,18 +364,109 @@ async function seed() {
     console.log('  ⓘ skipping live Squad inflows (demo VA)');
   }
 
-  // 8. Compute + persist score snapshot
+  // 8. Compute + persist score snapshot for the trader
   const result = recomputeAndSave(userId);
   console.log('  TradeScore: ' + result.score + ' / 850');
   console.log('    monthly revenue: ₦' + (result.aggregates.monthlyRevenue || 0).toLocaleString('en-NG'));
   console.log('    unique customers: ' + result.aggregates.uniqueCustomers);
   console.log('    growth: ' + (result.aggregates.growthPct ?? '—') + '%');
 
+  // 9. Seed worker (job-seeker) accounts so the two-sided story is real.
+  //    Each worker gets a real Squad VA and a small earnings history.
+  console.log('\n▸ Seeding ' + WORKERS.length + ' worker accounts…');
+  const workerSummaries = [];
+  for (const w of WORKERS) {
+    const summary = await seedWorker(w);
+    workerSummaries.push(summary);
+  }
+
   console.log('\n✓ Demo seed complete.');
-  console.log('  Sign in with:');
+  console.log('  Trader login:');
   console.log('    email:    ' + PERSONA.email);
   console.log('    password: ' + PERSONA.password);
   console.log('    VA:       ' + va.number + ' (' + va.bank + (va.demo ? ' · demo' : '') + ')');
+  console.log('  Worker logins (all password: demo1234):');
+  workerSummaries.forEach(w => {
+    console.log('    ' + w.email.padEnd(34) + ' · TradeScore ' + (w.score ?? '—') + ' · VA ' + w.va);
+  });
+}
+
+// Creates one worker user with a real Squad VA and a backdated earnings
+// history. Workers share the trader's BVN — Squad sandbox allows it.
+async function seedWorker(w) {
+  // Wipe any prior worker with this email so the seed is idempotent.
+  const prev = db.prepare('SELECT id FROM users WHERE email = ?').get(w.email);
+  if (prev) db.prepare('DELETE FROM users WHERE id = ?').run(prev.id);
+
+  const customer_identifier = newCustomerId();
+  const va = await provisionVirtualAccount(customer_identifier, {
+    first_name: w.first_name,
+    last_name:  w.last_name,
+    email:      w.email,
+  });
+
+  const password_hash = bcrypt.hashSync(w.password, 10);
+  const createdAt = new Date(Date.now() - (4 + Math.floor(Math.random() * 4)) * 30 * MS_PER_DAY).toISOString();
+  const info = db.prepare(`
+    INSERT INTO users (
+      customer_identifier, email, password_hash, role,
+      first_name, last_name, mobile_num, dob, bvn, gender, address,
+      business_name, category, location,
+      virtual_account_number, virtual_account_bank, created_at
+    ) VALUES (
+      @customer_identifier, @email, @password_hash, 'worker',
+      @first_name, @last_name, @mobile_num, @dob, @bvn, @gender, @address,
+      @business_name, @category, @location,
+      @virtual_account_number, @virtual_account_bank, @created_at
+    )
+  `).run({
+    customer_identifier,
+    email: w.email,
+    password_hash,
+    first_name: w.first_name,
+    last_name:  w.last_name,
+    mobile_num: PERSONA.mobile_num,
+    dob:        PERSONA.dob,
+    bvn:        PERSONA.bvn,
+    gender:     PERSONA.gender,
+    address:    PERSONA.address,
+    business_name: w.business_name,
+    category: 'Services',
+    location: w.location,
+    virtual_account_number: va.number,
+    virtual_account_bank:   va.bank,
+    created_at: createdAt,
+  });
+  const workerId = info.lastInsertRowid;
+
+  // Earnings history — one gig per slot, spread across the last ~4 months.
+  // Descriptions vary so Customer Diversity factor lands above zero.
+  const traders = [
+    'Gig from Funmi Adeyemi · delivery',
+    'Gig from Adebayo Hub · stock run',
+    'Gig from Kemi Stores · shop help',
+    'Gig from Yetunde Mart · market run',
+    'Gig from Mama Bola · errand',
+  ];
+  const txInsert = db.prepare(`
+    INSERT INTO transactions (user_id, squad_ref, direction, amount_kobo, description, category, occurred_at)
+    VALUES (?, ?, 'in', ?, ?, 'Sales', ?)
+  `);
+  let refSeq = 1;
+  w.gigs.forEach((amt, i) => {
+    const monthsBack = Math.max(0, w.gigs.length - 1 - i) % 4;
+    const day = 1 + Math.floor(Math.random() * 26);
+    const ts = timestampInMonth(monthsBack, day);
+    txInsert.run(workerId,
+      'WSEED-' + workerId + '-' + String(refSeq++).padStart(3, '0'),
+      amt * 100, pick(traders), ts);
+  });
+
+  const score = recomputeAndSave(workerId);
+  console.log('  ✓ ' + w.first_name + ' ' + w.last_name + ' (' + w.email + ')');
+  console.log('     VA: ' + va.number + (va.demo ? ' (demo)' : '') + ' · TradeScore: ' + (score.score ?? '—'));
+
+  return { email: w.email, score: score.score, va: va.number };
 }
 
 seed().then(

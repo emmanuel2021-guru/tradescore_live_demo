@@ -1,11 +1,13 @@
 import { el, fmt, icon, toast } from '../utils.js';
-import { LOAN_TIERS } from '../data.js';
 import { getUser, getScore, refreshTxsFromServer } from '../store.js';
-import { recommendLoan } from '../ai.js';
+import { recommendLoan, loanTiersFor } from '../ai.js';
 import { api } from '../api.js';
 
 export function LoansPanel() {
   const TRADER = getUser();
+  const role = TRADER.role || 'trader';
+  const isWorker = role === 'worker';
+  const LOAN_TIERS = loanTiersFor(role);
   const liveScore = getScore();
   // Live score wins; fall back to mock TRADER.score for marketing-style preview
   // when the backend hasn't computed one yet.
@@ -75,9 +77,12 @@ export function LoansPanel() {
   const tiersWrap = el('div', { class: 'fade-up-1' });
   tiersWrap.appendChild(el('div', { class: 'flex items-center justify-between mb-4 flex-wrap gap-2' },
     el('div', {},
-      el('h3', { class: 'font-display text-[20px] font-extrabold text-squad-deep' }, 'GTBank loan products'),
+      el('h3', { class: 'font-display text-[20px] font-extrabold text-squad-deep' },
+        isWorker ? 'GTBank microcredit for workers' : 'GTBank loan products'),
       el('p', { class: 'text-[12.5px] text-ink-3 mt-0.5' },
-        'Live rates from GTBank — tiers unlock as your TradeScore grows.'),
+        isWorker
+          ? 'Built for informal workers — small principals, fast repayment, no collateral.'
+          : 'Live rates from GTBank — tiers unlock as your TradeScore grows.'),
     ),
     el('span', { class: 'chip', style: { background: '#FFF4E0', color: '#7B5500' } },
       icon('bank2'), 'Powered by GTBank'),
@@ -87,10 +92,219 @@ export function LoansPanel() {
   tiersWrap.appendChild(tiersGrid);
   root.appendChild(tiersWrap);
 
+  // ── TradeScore journey (past + projected) ───────────────
+  root.appendChild(buildJourneyCard({ userScore }));
+
   // ── Calculator ───────────────────────────────────────────
-  root.appendChild(buildCalculator({ userScore, monthlyRevenue, preApproved }));
+  root.appendChild(buildCalculator({ userScore, monthlyRevenue, preApproved, tiers: LOAN_TIERS }));
 
   return root;
+}
+
+// ── TradeScore journey card ──────────────────────────────────────
+// Shows a 12-month TradeScore trajectory — past 6 months computed from real
+// transactions, next 6 months projected from the historical slope. Tier
+// unlock markers make the feedback loop visible: "keep doing what you're
+// doing and the next loan tier unlocks at month N".
+function buildJourneyCard({ userScore }) {
+  const card = el('div', { class: 'card p-6 fade-up-1' });
+  card.appendChild(el('div', { class: 'flex items-center justify-between mb-4 flex-wrap gap-2' },
+    el('div', {},
+      el('h3', { class: 'font-display text-[18px] font-extrabold text-squad-deep' }, 'Your TradeScore journey'),
+      el('p', { class: 'text-[12px] text-ink-3 mt-0.5' },
+        'Past 6 months computed from your Squad activity. Next 6 months projected from your slope.'),
+    ),
+    el('span', {
+      class: 'chip',
+      style: { background: '#E8F4EE', color: '#0B6E4F' },
+    }, icon('graph-up-arrow'), 'Live · feedback loop'),
+  ));
+
+  const host = el('div', {
+    class: 'flex items-center justify-center text-ink-3 text-[12px] py-8',
+  },
+    el('span', { class: 'spin inline-block w-4 h-4 border-2 border-squad-green border-t-transparent rounded-full mr-2 align-middle' }),
+    'Computing trajectory…',
+  );
+  card.appendChild(host);
+
+  api.scoreHistory().then(data => {
+    host.innerHTML = '';
+    host.classList.remove('items-center', 'justify-center', 'py-8', 'text-ink-3', 'text-[12px]');
+    host.className = '';
+    host.appendChild(drawJourneyChart(data));
+    host.appendChild(buildMilestoneStrip(data, userScore));
+  }).catch(e => {
+    host.innerHTML = '';
+    host.appendChild(el('div', { class: 'text-[12px] text-ink-3 text-center py-6' },
+      'Trajectory unavailable: ' + (e.message || 'unknown error')));
+  });
+
+  return card;
+}
+
+function drawJourneyChart(data) {
+  const { series, today_index } = data;
+  const wrap = el('div', { class: 'w-full relative mt-1' });
+
+  const W = 760, H = 240, PAD_X = 36, PAD_Y = 24;
+  const scores = series.map(p => p.score).filter(Number.isFinite);
+  const baseMin = Math.min(...scores, 850);
+  const baseMax = Math.max(...scores, 350);
+  const yMin = Math.max(350, baseMin - 30);
+  const yMax = Math.min(850, Math.max(baseMax + 30, yMin + 100));
+  const stepX = (W - PAD_X * 2) / Math.max(1, series.length - 1);
+  const yOf = (s) => H - PAD_Y - ((s - yMin) / (yMax - yMin)) * (H - PAD_Y * 2);
+  const xOf = (i) => PAD_X + i * stepX;
+
+  // Build separate past + projected paths, with the today index acting as
+  // the join point. Projected line is dashed; past is solid.
+  const points = series.map((p, i) => ({
+    x: xOf(i),
+    y: p.score != null ? yOf(p.score) : null,
+    score: p.score,
+    label: p.label,
+    kind: p.kind,
+  }));
+
+  const pastPoints = points.slice(0, today_index + 1).filter(p => p.y != null);
+  const projPoints = [points[today_index], ...points.slice(today_index + 1)].filter(p => p.y != null);
+
+  const pathFor = (pts) =>
+    pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ' ' + p.y.toFixed(1)).join(' ');
+
+  const gradId = 'journeyFill_' + Math.random().toString(36).slice(2, 8);
+  const fillPath = pastPoints.length >= 2
+    ? pathFor(pastPoints) +
+      ` L${pastPoints[pastPoints.length - 1].x.toFixed(1)} ${H - PAD_Y} L${pastPoints[0].x.toFixed(1)} ${H - PAD_Y} Z`
+    : '';
+
+  // Tier threshold lines (worker or trader tier minScores within range)
+  const tradertiers = [
+    { min: 670, name: 'GT Smart Advance' },
+    { min: 720, name: 'GT MaxPlus SME' },
+    { min: 770, name: 'GT SME Growth' },
+  ];
+  const workerTiers = [
+    { min: 620, name: 'GT Skills Loan' },
+    { min: 700, name: 'GT Asset Loan' },
+  ];
+  const role = getUser().role || 'trader';
+  const tierLines = (role === 'worker' ? workerTiers : tradertiers)
+    .filter(t => t.min >= yMin && t.min <= yMax);
+
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H + 28}`);
+  svg.style.width = '100%';
+  svg.style.height = 'auto';
+  svg.style.display = 'block';
+
+  // Today vertical separator (light)
+  const todayX = points[today_index].x;
+  svg.innerHTML = `
+    <defs>
+      <linearGradient id="${gradId}" x1="0%" y1="0%" x2="0%" y2="100%">
+        <stop offset="0%" stop-color="#0B6E4F" stop-opacity="0.22"/>
+        <stop offset="100%" stop-color="#0B6E4F" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+    ${[1,2,3].map(i => {
+      const y = PAD_Y + ((H - PAD_Y * 2) / 4) * i;
+      return `<line x1="${PAD_X}" y1="${y}" x2="${W - PAD_X}" y2="${y}" stroke="#E2E8E4" stroke-dasharray="4 6" />`;
+    }).join('')}
+    ${tierLines.map(t => `
+      <line x1="${PAD_X}" y1="${yOf(t.min).toFixed(1)}" x2="${W - PAD_X}" y2="${yOf(t.min).toFixed(1)}"
+        stroke="#9B6B00" stroke-width="1.2" stroke-dasharray="2 4" opacity="0.55" />
+      <text x="${W - PAD_X - 4}" y="${(yOf(t.min) - 4).toFixed(1)}" text-anchor="end"
+        style="font-family: Inter, sans-serif; font-size: 10.5px; font-weight: 700; fill: #9B6B00;">${t.name} · ${t.min}</text>
+    `).join('')}
+    <line x1="${todayX}" y1="${PAD_Y}" x2="${todayX}" y2="${H - PAD_Y}" stroke="#022B23" stroke-width="1" stroke-dasharray="3 4" opacity="0.4" />
+    <text x="${todayX}" y="${PAD_Y - 6}" text-anchor="middle"
+      style="font-family: Inter, sans-serif; font-size: 10.5px; font-weight: 800; fill: #022B23; letter-spacing: 0.08em; text-transform: uppercase;">Today</text>
+    ${fillPath ? `<path d="${fillPath}" fill="url(#${gradId})" />` : ''}
+    ${pastPoints.length >= 2 ? `<path d="${pathFor(pastPoints)}" fill="none" stroke="#0B6E4F" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />` : ''}
+    ${projPoints.length >= 2 ? `<path d="${pathFor(projPoints)}" fill="none" stroke="#0B6E4F" stroke-width="2.5" stroke-dasharray="6 5" stroke-linecap="round" stroke-linejoin="round" opacity="0.8" />` : ''}
+    ${points.map((p, i) => p.y == null ? '' : `
+      <circle cx="${p.x}" cy="${p.y}" r="${i === today_index ? 6 : 3.5}"
+        fill="${p.kind === 'past' ? '#0B6E4F' : '#E8FF8B'}"
+        stroke="${i === today_index ? '#022B23' : '#fff'}"
+        stroke-width="${i === today_index ? 2.5 : 2}" />
+    `).join('')}
+    ${points[today_index].y != null ? `
+      <text x="${points[today_index].x}" y="${(points[today_index].y - 14).toFixed(1)}" text-anchor="middle"
+        style="font-family: Inter, sans-serif; font-size: 12px; font-weight: 800; fill: #022B23;">${points[today_index].score}</text>
+    ` : ''}
+    ${points[points.length - 1].y != null ? `
+      <text x="${points[points.length - 1].x}" y="${(points[points.length - 1].y - 12).toFixed(1)}" text-anchor="end"
+        style="font-family: Inter, sans-serif; font-size: 11.5px; font-weight: 700; fill: #0B6E4F;">+${points[points.length - 1].score - (points[today_index].score || 0)} pts</text>
+    ` : ''}
+    ${points.map(p => `<text x="${p.x}" y="${H + 18}" text-anchor="middle"
+      style="font-family: Inter, sans-serif; font-size: 11px; font-weight: 600; fill: #4A5C56;">${p.label}</text>`).join('')}
+  `;
+  wrap.appendChild(svg);
+  return wrap;
+}
+
+function buildMilestoneStrip(data, userScore) {
+  const wrap = el('div', { class: 'mt-4 grid sm:grid-cols-3 gap-3' });
+
+  // Stat 1: slope per month
+  wrap.appendChild(el('div', {
+    class: 'p-3.5 rounded-xl',
+    style: { background: '#F5F9F6', border: '1px solid #E2E8E4' },
+  },
+    el('div', { class: 'text-[10.5px] uppercase tracking-wider font-bold text-ink-3' }, 'Your slope'),
+    el('div', { class: 'flex items-baseline gap-1.5 mt-0.5' },
+      el('span', { class: 'font-display font-extrabold text-squad-deep', style: { fontSize: '22px', letterSpacing: '-0.02em' } },
+        '+' + data.slope_per_month),
+      el('span', { class: 'text-[11px] text-ink-3 font-bold' }, 'pts / month'),
+    ),
+    el('div', { class: 'text-[11px] text-ink-3 mt-0.5' }, 'Built from your actual Squad activity'),
+  ));
+
+  // Stat 2 + 3: next tier(s) to unlock — pulled from milestones
+  if (data.milestones.length) {
+    data.milestones.slice(0, 2).forEach(m => {
+      wrap.appendChild(el('div', {
+        class: 'p-3.5 rounded-xl relative overflow-hidden',
+        style: { background: 'linear-gradient(135deg, #FFF4D6, #E8FF8B)', border: '1px solid #F0DA9A' },
+      },
+        el('div', { class: 'flex items-center gap-1.5 mb-0.5' },
+          el('span', { style: { color: '#9B6B00', fontSize: '12px' } }, icon('unlock-fill')),
+          el('div', { class: 'text-[10.5px] uppercase tracking-wider font-bold', style: { color: '#7B5500' } },
+            'Unlocks in ' + m.monthsAway + ' month' + (m.monthsAway === 1 ? '' : 's')),
+        ),
+        el('div', { class: 'font-display font-extrabold text-squad-deep mt-0.5', style: { fontSize: '15px' } },
+          m.label),
+        el('div', { class: 'text-[11px] mt-0.5', style: { color: '#7B5500' } }, 'at score ' + m.atScore),
+      ));
+    });
+  } else if (userScore >= 770) {
+    wrap.appendChild(el('div', {
+      class: 'p-3.5 rounded-xl sm:col-span-2',
+      style: { background: 'linear-gradient(135deg, #022B23, #0B6E4F)', color: '#fff' },
+    },
+      el('div', { class: 'text-[10.5px] uppercase tracking-wider font-bold', style: { color: '#E8FF8B' } },
+        'Top tier'),
+      el('div', { class: 'font-display font-extrabold mt-0.5', style: { fontSize: '15px' } },
+        'Every GTBank product is open to you'),
+      el('div', { class: 'text-[11px] mt-0.5', style: { color: 'rgba(255,255,255,0.78)' } },
+        'Your TradeScore puts you in the top credit tier. Keep your slope steady to lock in the lowest rates.'),
+    ));
+  } else {
+    wrap.appendChild(el('div', {
+      class: 'p-3.5 rounded-xl sm:col-span-2',
+      style: { background: '#F5F9F6', border: '1px solid #E2E8E4' },
+    },
+      el('div', { class: 'text-[10.5px] uppercase tracking-wider font-bold text-ink-3' }, 'Next milestone'),
+      el('div', { class: 'font-display font-extrabold text-squad-deep mt-0.5', style: { fontSize: '15px' } },
+        'Stay on this slope'),
+      el('div', { class: 'text-[11px] text-ink-3 mt-0.5' },
+        'You\'re already at the top of your role\'s tier ladder. Maintain steady inflows to lock in your rate.'),
+    ));
+  }
+
+  return wrap;
 }
 
 function StatCard({ iconName, label, value, sub, accent }) {
@@ -208,7 +422,8 @@ function TierCard(t, eligible, i) {
 }
 
 // ── Calculator ─────────────────────────────────────────────
-function buildCalculator({ userScore, monthlyRevenue, preApproved, navigate }) {
+function buildCalculator({ userScore, monthlyRevenue, preApproved, tiers, navigate }) {
+  const LOAN_TIERS = tiers;
   let amount = Math.min(500000, preApproved);
   let term   = '12 months';
   let purpose = 'stock';

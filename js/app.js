@@ -98,7 +98,7 @@ register('/login',    (ctx) => Login(ctx));
 // Dashboard panels — all share the same shell, just different inner panel.
 // Auth-guarded: if there's no customer_identifier in localStorage we bounce to
 // /login so an unauthenticated user never sees the dashboard with stale/mock data.
-const DASH_PATH = /^\/app(?:\/(?<panel>overview|score|loans|inventory|transactions|assistant|profile))?$/;
+const DASH_PATH = /^\/app(?:\/(?<panel>overview|score|loans|inventory|transactions|assistant|network|profile))?$/;
 register(DASH_PATH, (ctx) => {
   if (!localStorage.getItem('tradescore_cid')) {
     queueMicrotask(() => ctx.navigate('/login'));
