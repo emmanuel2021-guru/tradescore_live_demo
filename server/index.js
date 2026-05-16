@@ -718,29 +718,25 @@ app.post('/api/loans/apply', authed, async (req, res) => {
        WHERE id = ?
     `).run(status, transaction_reference, nip_ref, loanId);
 
-    // Record an outflow transaction so the dashboard reflects the disbursement.
-    db.prepare(`
-      INSERT INTO transactions (user_id, squad_ref, direction, amount_kobo, description, occurred_at)
-      VALUES (?, ?, 'out', ?, ?, datetime('now'))
-    `).run(
-      req.user.id,
-      transaction_reference,
-      amount_kobo,
-      `Loan disbursement to ${b.account_name}${demoMode ? ' (demo)' : ''}`,
-    );
+    // NOTE: we intentionally do NOT insert a Squad-wallet transaction here.
+    // Loans disburse to the user's external bank account, not their Squad VA,
+    // so the disbursement must not affect Squad wallet balance or appear in
+    // the trader's transaction feed. The source of truth for the disbursement
+    // is the loans table.
 
     const score = recomputeAndSave(req.user.id);
     const loan = db.prepare('SELECT * FROM loans WHERE id = ?').get(loanId);
 
-    // Live push so the dashboard shows a toast + bell badge ticks.
+    // Live push so other open tabs / the bell badge refresh. Using a custom
+    // 'kind' so the generic outflow toast handler does not fire (this is not
+    // a wallet outflow — see note above).
     sseBroadcast(req.user.id, {
-      kind: 'outflow',
+      kind: 'loan_disbursed',
       amount: Math.round(amount_kobo / 100),
       recipient: b.account_name,
       ref: transaction_reference,
       nip_ref,
       demo: demoMode,
-      reason: 'loan_disbursement',
     });
 
     res.json({ ok: true, loan, transfer: result, score, demo_fallback: demoMode });
@@ -758,15 +754,8 @@ app.post('/api/loans/apply', authed, async (req, res) => {
          WHERE id = ?
       `).run(transaction_reference, demoNipRef, loanId);
 
-      db.prepare(`
-        INSERT INTO transactions (user_id, squad_ref, direction, amount_kobo, description, occurred_at)
-        VALUES (?, ?, 'out', ?, ?, datetime('now'))
-      `).run(
-        req.user.id,
-        transaction_reference,
-        amount_kobo,
-        `Loan disbursement to ${b.account_name} (sandbox demo)`,
-      );
+      // Same rationale as the success path: loans land in external banks,
+      // not the Squad wallet — no transaction insertion on the trader.
 
       console.warn('[loans] SQUAD_DEMO_MODE: faked disbursement due to insufficient balance →', demoNipRef);
       const score = recomputeAndSave(req.user.id);
